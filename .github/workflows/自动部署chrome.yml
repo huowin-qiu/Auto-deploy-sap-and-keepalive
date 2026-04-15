@@ -1,7 +1,7 @@
-name: 自动部署Chrome到SAP
+name: 自动部署Chrome到SAP-稳定版
 
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
     inputs:
       region:
         description: '选择部署区域'
@@ -13,61 +13,82 @@ on:
           - US(free)
           - SAP-UAE(Dubai)
           - SAP-AU(Sydney)
-          - SAP-US(Sterling)
           - SAP-JP(Tokyo)
-          # ... 其他区域保持一致
       app_name:
-        description: '应用名称'
+        description: '应用名称（留空则自动生成）'
         required: false
         default: ''
 
 env:
-  # 使用 jlesage 镜像，因为它对网页端键盘输入优化得最好
-  DOCKER_IMAGE: 'jlesage/chrome:latest' 
-  MEMORY: '2560M'  # 严格限制在 2.5G
+  # 使用 GitHub 托管的镜像，避开 Docker Hub 报错
+  DOCKER_IMAGE: 'ghcr.io/eooce/chrome:latest'
+  MEMORY: '2560M'
   DISK: '1024M'
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout
+    - name: 检出代码
       uses: actions/checkout@v4
 
-    - name: Install CF CLI
+    - name: 安装 CF CLI
       run: |
         wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key | sudo apt-key add -
         echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
         sudo apt-get update && sudo apt-get install -y cf8-cli
 
-    - name: Set Config
+    - name: 准备部署环境
       run: |
-        RANDOM_STR=$(head /dev/urandom | tr -dc 'a-z' | head -c 6)
-        # 默认使用美国免费区，如有需要可在 actions 界面手动选
-        echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> $GITHUB_ENV
+        # 生成随机后缀
+        RS=$(head /dev/urandom | tr -dc 'a-z' | head -c 6)
+        
+        # 确定 API 端点
         if [ "${{ github.event.inputs.region }}" == "SG(free)" ]; then
           echo "CF_API=https://api.cf.ap21.hana.ondemand.com" >> $GITHUB_ENV
+          DEFAULT_NAME="chrome-sg-$RS"
+        else
+          echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> $GITHUB_ENV
+          DEFAULT_NAME="chrome-us-$RS"
         fi
-        echo "APP_NAME=${{ github.event.inputs.app_name || format('chrome-vnc-{0}', env.RANDOM_STR) }}" >> $GITHUB_ENV
+        
+        # 确定最终应用名称
+        if [ -n "${{ github.event.inputs.app_name }}" ]; then
+          echo "FINAL_APP_NAME=${{ github.event.inputs.app_name }}" >> $GITHUB_ENV
+        else
+          echo "FINAL_APP_NAME=$DEFAULT_NAME" >> $GITHUB_ENV
+        fi
 
-    - name: CF Login & Deploy
+    - name: 登录并执行部署
       run: |
         cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
+        
+        # 自动获取第一个 Org 和 Space
         ORG=$(cf orgs | sed -n '4p')
         SPACE=$(cf spaces | sed -n '4p')
         cf target -o "$ORG" -s "$SPACE"
         
-        # 部署并设置 Chrome 专用参数
-        cf push ${{ env.APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --health-check-type port
+        echo "正在部署应用: ${{ env.FINAL_APP_NAME }} 到 $ORG / $SPACE"
         
-        cf set-env ${{ env.APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
-        cf set-env ${{ env.APP_NAME }} LANG "zh_CN.UTF-8"
-        # 解决容器内 Chrome 运行的核心参数
-        cf set-env ${{ env.APP_NAME }} CHROMIUM_FLAGS "--no-sandbox --disable-dev-shm-usage"
+        # 推送应用
+        cf push ${{ env.FINAL_APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --health-check-type port
         
-        cf restage ${{ env.APP_NAME }}
+        # 设置必要环境变量
+        cf set-env ${{ env.FINAL_APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
+        cf set-env ${{ env.FINAL_APP_NAME }} LANG "zh_CN.UTF-8"
+        # 解决 Chrome 容器权限问题的核心参数
+        cf set-env ${{ env.FINAL_APP_NAME }} CHROMIUM_FLAGS "--no-sandbox --disable-dev-shm-usage --disable-gpu"
+        
+        # 重新应用配置
+        cf restage ${{ env.FINAL_APP_NAME }}
 
-    - name: Success
+    - name: 部署报告
       run: |
-        ROUTE=$(cf app ${{ env.APP_NAME }} | grep "routes:" | awk '{print $2}')
-        echo "Successfully deployed Chrome at: https://$ROUTE"
+        ROUTE=$(cf app ${{ env.FINAL_APP_NAME }} | grep "routes:" | awk '{print $2}')
+        echo "--------------------------------------------------"
+        echo "✅ 部署成功！"
+        echo "应用名称: ${{ env.FINAL_APP_NAME }}"
+        echo "内存分配: ${{ env.MEMORY }}"
+        echo "访问地址: https://$ROUTE"
+        echo "默认 VNC 密码: ${{ secrets.VNC_PASSWORD || '123456' }}"
+        echo "--------------------------------------------------"
