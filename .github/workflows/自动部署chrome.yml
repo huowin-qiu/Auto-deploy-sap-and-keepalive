@@ -1,4 +1,4 @@
-name: 自动部署Chrome-端口修正版
+name: 自动部署Chrome-彻底清场版
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ on:
 
 env:
   DOCKER_IMAGE: 'lscr.io/linuxserver/chrome:latest'
-  MEMORY: '2560M'  # 保持 2.5G，够用且稳
+  MEMORY: '2560M'  # 保持 2.5G，确保 Staging 成功
   DISK: '1024M'
 
 jobs:
@@ -43,29 +43,31 @@ jobs:
         fi
         echo "FINAL_APP_NAME=chrome-vnc-$RS" >> $GITHUB_ENV
 
-    - name: 登录并部署
+    - name: 登录并清空空间所有应用
       run: |
         cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
         ORG=$(cf orgs | sed -n '4p')
         SPACE=$(cf spaces | sed -n '4p')
         cf target -o "$ORG" -s "$SPACE"
         
-        cf delete ${{ env.FINAL_APP_NAME }} -f || true
-        
-        # 关键修改：指定端口 3000，这是 linuxserver 镜像的默认 Web 端口
+        echo "⚠️ 正在清理空间内的旧应用以释放内存..."
+        # 核心逻辑：获取应用列表并全部删除
+        cf apps | awk 'NR>3 {print $1}' | xargs -I {} cf delete {} -f -r
+        echo "✅ 空间已清空，准备重新部署。"
+
+    - name: 推送并设置端口
+      run: |
+        # 显式指定端口 3000 并增加超时
         cf push ${{ env.FINAL_APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --health-check-type port -t 180
         
-        # 设置端口环境变量，确保内部服务监听 3000
         cf set-env ${{ env.FINAL_APP_NAME }} PORT 3000
         cf set-env ${{ env.FINAL_APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
         cf set-env ${{ env.FINAL_APP_NAME }} TZ "Asia/Shanghai"
         cf set-env ${{ env.FINAL_APP_NAME }} CHROMIUM_FLAGS "--no-sandbox --disable-dev-shm-usage"
         
-        # 重新加载
         cf restage ${{ env.FINAL_APP_NAME }}
 
     - name: 成功报告
       run: |
         ROUTE=$(cf app ${{ env.FINAL_APP_NAME }} | grep "routes:" | awk '{print $2}')
-        echo "✅ 部署完成！"
-        echo "地址: https://$ROUTE"
+        echo "🚀 部署完成！访问地址: https://$ROUTE"
