@@ -1,10 +1,10 @@
-name: 自动部署Chrome-PaaS优化版
+name: 自动部署Chrome-终极兼容版
 
 on:
   workflow_dispatch:
     inputs:
       region:
-        description: '选择部署区域'
+        description: '选择部署区域 (如果US报错，请务必换到SG试试)'
         required: true
         default: 'US(free)'
         type: choice
@@ -16,8 +16,8 @@ on:
           - SAP-JP(Tokyo)
 
 env:
-  # 换回 jlesage，但使用 ghcr.io 镜像源绕过 Docker Hub 的 403 限制
-  DOCKER_IMAGE: 'ghcr.io/jlesage/chrome:latest'
+  # 使用 jlesage 官方源。如果报 403，SAP 会自动重试。
+  DOCKER_IMAGE: 'docker.io/jlesage/chrome:latest'
   MEMORY: '2560M'
   DISK: '1024M'
 
@@ -44,30 +44,40 @@ jobs:
         fi
         echo "FINAL_APP_NAME=chrome-vnc-$RS" >> $GITHUB_ENV
 
-    - name: 登录并清空所有旧应用
+    - name: 登录并清场
       run: |
         cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
         ORG=$(cf orgs | sed -n '4p')
         SPACE=$(cf spaces | sed -n '4p')
         cf target -o "$ORG" -s "$SPACE"
-        # 彻底清理
+        # 强制删除所有应用，腾出所有 4G 配额
         cf apps | awk 'NR>3 {print $1}' | xargs -I {} cf delete {} -f -r
 
-    - name: 推送并适配 jlesage 镜像
+    - name: 部署应用 (不立即启动)
       run: |
-        # jlesage 镜像默认监听 5800 端口，我们必须告诉 SAP 检查这个端口
-        cf push ${{ env.FINAL_APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --health-check-type port -t 180
-        
-        # 关键：jlesage 的 Web 访问端口是 5800
-        cf set-env ${{ env.FINAL_APP_NAME }} PORT 5800
-        cf set-env ${{ env.FINAL_APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
-        
-        # 禁用 Chrome 的共享内存机制，这是在 PaaS 平台运行的关键
-        cf set-env ${{ env.FINAL_APP_NAME }} CHROMIUM_FLAGS "--no-sandbox --disable-dev-shm-usage --user-data-dir=/tmp/user-data"
-        
-        cf restage ${{ env.FINAL_APP_NAME }}
+        # 使用 --no-start 避开即时启动可能导致的各种冲突
+        cf push ${{ env.FINAL_APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --no-start
 
-    - name: 部署报告
+    - name: 注入关键参数
+      run: |
+        # jlesage 镜像必须监听 5800 端口
+        cf set-health-check ${{ env.FINAL_APP_NAME }} port --port 5800
+        
+        # 环境变量：解决 Chrome 在容器中崩溃的核心
+        cf set-env ${{ env.FINAL_APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
+        cf set-env ${{ env.FINAL_APP_NAME }} ENABLE_CJK_FONT 1
+        cf set-env ${{ env.FINAL_APP_NAME }} SECURE_CONNECTION 0
+        
+        # 解决核心权限问题：禁用沙盒，重定向用户数据到临时目录
+        cf set-env ${{ env.FINAL_APP_NAME }} CHROMIUM_FLAGS "--no-sandbox --disable-dev-shm-usage --user-data-dir=/tmp/chrome-data --remote-debugging-port=9222"
+
+    - name: 启动应用
+      run: |
+        # 设置启动超时
+        cf v3-set-health-check ${{ env.FINAL_APP_NAME }} port --port 5800
+        cf start ${{ env.FINAL_APP_NAME }}
+
+    - name: 成功报告
       run: |
         ROUTE=$(cf app ${{ env.FINAL_APP_NAME }} | grep "routes:" | awk '{print $2}')
         echo "🚀 部署完成！访问地址: https://$ROUTE"
