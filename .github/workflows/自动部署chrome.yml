@@ -1,4 +1,4 @@
-name: 自动部署Chrome-彻底清场版
+name: 自动部署Chrome-PaaS优化版
 
 on:
   workflow_dispatch:
@@ -16,8 +16,9 @@ on:
           - SAP-JP(Tokyo)
 
 env:
-  DOCKER_IMAGE: 'lscr.io/linuxserver/chrome:latest'
-  MEMORY: '2560M'  # 保持 2.5G，确保 Staging 成功
+  # 换回 jlesage，但使用 ghcr.io 镜像源绕过 Docker Hub 的 403 限制
+  DOCKER_IMAGE: 'ghcr.io/jlesage/chrome:latest'
+  MEMORY: '2560M'
   DISK: '1024M'
 
 jobs:
@@ -33,7 +34,7 @@ jobs:
         echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
         sudo apt-get update && sudo apt-get install -y cf8-cli
 
-    - name: 准备变量
+    - name: 准备变量与清场
       run: |
         RS=$(head /dev/urandom | tr -dc 'a-z' | head -c 4)
         if [ "${{ github.event.inputs.region }}" == "SG(free)" ]; then
@@ -43,31 +44,30 @@ jobs:
         fi
         echo "FINAL_APP_NAME=chrome-vnc-$RS" >> $GITHUB_ENV
 
-    - name: 登录并清空空间所有应用
+    - name: 登录并清空所有旧应用
       run: |
         cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
         ORG=$(cf orgs | sed -n '4p')
         SPACE=$(cf spaces | sed -n '4p')
         cf target -o "$ORG" -s "$SPACE"
-        
-        echo "⚠️ 正在清理空间内的旧应用以释放内存..."
-        # 核心逻辑：获取应用列表并全部删除
+        # 彻底清理
         cf apps | awk 'NR>3 {print $1}' | xargs -I {} cf delete {} -f -r
-        echo "✅ 空间已清空，准备重新部署。"
 
-    - name: 推送并设置端口
+    - name: 推送并适配 jlesage 镜像
       run: |
-        # 显式指定端口 3000 并增加超时
+        # jlesage 镜像默认监听 5800 端口，我们必须告诉 SAP 检查这个端口
         cf push ${{ env.FINAL_APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --health-check-type port -t 180
         
-        cf set-env ${{ env.FINAL_APP_NAME }} PORT 3000
+        # 关键：jlesage 的 Web 访问端口是 5800
+        cf set-env ${{ env.FINAL_APP_NAME }} PORT 5800
         cf set-env ${{ env.FINAL_APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
-        cf set-env ${{ env.FINAL_APP_NAME }} TZ "Asia/Shanghai"
-        cf set-env ${{ env.FINAL_APP_NAME }} CHROMIUM_FLAGS "--no-sandbox --disable-dev-shm-usage"
+        
+        # 禁用 Chrome 的共享内存机制，这是在 PaaS 平台运行的关键
+        cf set-env ${{ env.FINAL_APP_NAME }} CHROMIUM_FLAGS "--no-sandbox --disable-dev-shm-usage --user-data-dir=/tmp/user-data"
         
         cf restage ${{ env.FINAL_APP_NAME }}
 
-    - name: 成功报告
+    - name: 部署报告
       run: |
         ROUTE=$(cf app ${{ env.FINAL_APP_NAME }} | grep "routes:" | awk '{print $2}')
         echo "🚀 部署完成！访问地址: https://$ROUTE"
