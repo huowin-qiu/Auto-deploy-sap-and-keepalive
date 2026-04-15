@@ -1,10 +1,10 @@
-name: 自动部署Chrome-4G极速版
+name: 自动部署Chrome-稳定优化版
 
 on:
   workflow_dispatch:
     inputs:
       region:
-        description: '选择部署区域 (建议尝试切换不同区域以避开拉取限制)'
+        description: '选择部署区域'
         required: true
         default: 'US(free)'
         type: choice
@@ -20,9 +20,9 @@ on:
         default: ''
 
 env:
-  # 使用官方维护的 LinuxServer 镜像，稳定性最高
   DOCKER_IMAGE: 'lscr.io/linuxserver/chrome:latest'
-  MEMORY: '4096M'
+  # 调整为 3.5G，留出 0.5G 缓冲，防止 SAP 调度器直接崩溃
+  MEMORY: '3584M'
   DISK: '2048M'
 
 jobs:
@@ -43,50 +43,39 @@ jobs:
         RS=$(head /dev/urandom | tr -dc 'a-z' | head -c 4)
         if [ "${{ github.event.inputs.region }}" == "SG(free)" ]; then
           echo "CF_API=https://api.cf.ap21.hana.ondemand.com" >> $GITHUB_ENV
-          DEF_NAME="chrome-4g-sg-$RS"
         else
           echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> $GITHUB_ENV
-          DEF_NAME="chrome-4g-us-$RS"
         fi
         
         if [ -n "${{ github.event.inputs.app_name }}" ]; then
           echo "FINAL_APP_NAME=${{ github.event.inputs.app_name }}" >> $GITHUB_ENV
         else
-          echo "FINAL_APP_NAME=$DEF_NAME" >> $GITHUB_ENV
+          echo "FINAL_APP_NAME=chrome-opt-$RS" >> $GITHUB_ENV
         fi
 
-    - name: 登录并清理资源
+    - name: 登录并清理
       run: |
         cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
         ORG=$(cf orgs | sed -n '4p')
         SPACE=$(cf spaces | sed -n '4p')
         cf target -o "$ORG" -s "$SPACE"
-        
-        # 强制清理旧的应用，释放 4G 空间
         cf delete ${{ env.FINAL_APP_NAME }} -f || true
 
-    - name: 推送谷歌浏览器
+    - name: 推送并设置超时
       run: |
-        # 使用 --no-route 可以在部署失败时更快清理，这里默认正常推送
-        cf push ${{ env.FINAL_APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --health-check-type port
+        # 使用 -t 180 延长启动检查时间到 3 分钟，防止因为 Chrome 启动慢被杀掉
+        cf push ${{ env.FINAL_APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --health-check-type port -t 180
 
-    - name: 配置浏览器环境
+    - name: 环境适配
       run: |
-        # LinuxServer 镜像专用环境变量
-        cf set-env ${{ env.FINAL_APP_NAME }} TITLE "Chrome-Standard"
         cf set-env ${{ env.FINAL_APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
         cf set-env ${{ env.FINAL_APP_NAME }} TZ "Asia/Shanghai"
-        
-        # 核心：必须禁用沙盒，否则 4G 内存也会报错
-        cf set-env ${{ env.FINAL_APP_NAME }} CHROMIUM_FLAGS "--no-sandbox --disable-dev-shm-usage"
+        # 针对 3.5G 内存优化 Chrome 参数
+        cf set-env ${{ env.FINAL_APP_NAME }} CHROMIUM_FLAGS "--no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer"
         
         cf restage ${{ env.FINAL_APP_NAME }}
 
-    - name: 部署成功报告
+    - name: 部署报告
       run: |
         ROUTE=$(cf app ${{ env.FINAL_APP_NAME }} | grep "routes:" | awk '{print $2}')
-        echo "=================================================="
-        echo "✅ 4G 内存版 Chrome 部署完成！"
-        echo "访问地址: https://$ROUTE"
-        echo "如果打不开，请检查 SAP BTP 控制台配额是否真的有 4G 空余。"
-        echo "=================================================="
+        echo "✅ 部署完成！访问地址: https://$ROUTE"
