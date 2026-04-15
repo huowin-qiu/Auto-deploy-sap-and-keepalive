@@ -1,25 +1,14 @@
-name: 自动部署Chrome-终极修正版
+name: 自动部署Chrome-终极稳定版
 
 on:
-  workflow_dispatch:
-    inputs:
-      region:
-        description: '选择区域'
-        required: true
-        default: 'US(free)'
-        type: choice
-        options:
-          - SG(free)
-          - US(free)
-      app_name:
-        description: '应用名称'
-        required: false
-        default: ''
+  workflow_dispatch: # 支持手动触发
+  schedule:
+    - cron: '0 0 * * *' # 这里的 0 0 代表 UTC 时间 0点，即北京时间早上 8 点
 
 env:
   DOCKER_IMAGE: 'jlesage/chrome:latest'
   MEMORY: '2560M'
-  DISK: '2048M'  # 硬盘翻倍到 2G
+  DISK: '3072M'  # 硬盘提升至 3G，确保 Chrome 缓存和插件有充足空间
 
 jobs:
   deploy:
@@ -34,45 +23,40 @@ jobs:
         echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
         sudo apt-get update && sudo apt-get install -y cf8-cli
 
-    - name: 准备变量与清场
+    - name: 确定环境
       run: |
-        RS=$(head /dev/urandom | tr -dc 'a-z' | head -c 4)
-        if [ "${{ github.event.inputs.region }}" == "SG(free)" ]; then
-          echo "CF_API=https://api.cf.ap21.hana.ondemand.com" >> $GITHUB_ENV
-        else
-          echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> $GITHUB_ENV
-        fi
-        echo "FINAL_APP_NAME=chrome-vnc-$RS" >> $GITHUB_ENV
+        # 默认使用美国区，如果多次失败建议手动运行并选 SG 区
+        echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> $GITHUB_ENV
+        echo "FINAL_APP_NAME=chrome-stable-$(date +%s | tail -c 4)" >> $GITHUB_ENV
 
-    - name: 登录并清场
+    - name: 登录并彻底清场
       run: |
         cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
         ORG=$(cf orgs | sed -n '4p')
         SPACE=$(cf spaces | sed -n '4p')
         cf target -o "$ORG" -s "$SPACE"
-        # 彻底清理所有旧应用
+        # 删除所有旧应用释放 4G 内存
         cf apps | awk 'NR>3 {print $1}' | xargs -I {} cf delete {} -f -r
 
-    - name: 部署应用 (不立即启动)
+    - name: 部署 (不立即启动)
       run: |
-        # 修正：先推送，不启动
         cf push ${{ env.FINAL_APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --no-start
 
     - name: 注入关键参数
       run: |
-        # 修正语法：cf set-health-check APP_NAME 类型
+        # 语法修复：设置健康检查为端口模式
         cf set-health-check ${{ env.FINAL_APP_NAME }} port
         
-        # 环境变量：jlesage 镜像必须通过这个告知内部 Web 服务端口
+        # 环境变量适配
         cf set-env ${{ env.FINAL_APP_NAME }} PORT 5800
         cf set-env ${{ env.FINAL_APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
+        cf set-env ${{ env.FINAL_APP_NAME }} ENABLE_CJK_FONT 1
         
-        # 重点优化：禁用沙盒，并将数据目录指向 /tmp 以防只读错误
-        cf set-env ${{ env.FINAL_APP_NAME }} CHROMIUM_FLAGS "--no-sandbox --disable-dev-shm-usage --user-data-dir=/tmp/chrome-data"
+        # 彻底禁用沙盒并重定向数据目录到可写区
+        cf set-env ${{ env.FINAL_APP_NAME }} CHROMIUM_FLAGS "--no-sandbox --disable-dev-shm-usage --user-data-dir=/tmp/chrome-data --disk-cache-dir=/tmp/cache"
 
-    - name: 启动应用
+    - name: 启动并验证
       run: |
-        # 启动并给 3 分钟宽限时间
         cf start ${{ env.FINAL_APP_NAME }}
 
     - name: 成功报告
