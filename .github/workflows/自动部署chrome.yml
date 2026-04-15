@@ -1,4 +1,4 @@
-name: 自动部署Chrome-兼容版
+name: 自动部署Chrome-端口修正版
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ on:
 
 env:
   DOCKER_IMAGE: 'lscr.io/linuxserver/chrome:latest'
-  MEMORY: '2048M'  # 降至 2G 以确保能通过 SAP 的配额检查
+  MEMORY: '2560M'  # 保持 2.5G，够用且稳
   DISK: '1024M'
 
 jobs:
@@ -41,7 +41,7 @@ jobs:
         else
           echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> $GITHUB_ENV
         fi
-        echo "FINAL_APP_NAME=chrome-stable-$RS" >> $GITHUB_ENV
+        echo "FINAL_APP_NAME=chrome-vnc-$RS" >> $GITHUB_ENV
 
     - name: 登录并部署
       run: |
@@ -50,20 +50,22 @@ jobs:
         SPACE=$(cf spaces | sed -n '4p')
         cf target -o "$ORG" -s "$SPACE"
         
-        # 强制清理旧的同名应用
         cf delete ${{ env.FINAL_APP_NAME }} -f || true
         
-        # 推送应用，延长启动超时到 180 秒
+        # 关键修改：指定端口 3000，这是 linuxserver 镜像的默认 Web 端口
         cf push ${{ env.FINAL_APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --health-check-type port -t 180
-
-    - name: 设置环境
-      run: |
+        
+        # 设置端口环境变量，确保内部服务监听 3000
+        cf set-env ${{ env.FINAL_APP_NAME }} PORT 3000
         cf set-env ${{ env.FINAL_APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
         cf set-env ${{ env.FINAL_APP_NAME }} TZ "Asia/Shanghai"
         cf set-env ${{ env.FINAL_APP_NAME }} CHROMIUM_FLAGS "--no-sandbox --disable-dev-shm-usage"
+        
+        # 重新加载
         cf restage ${{ env.FINAL_APP_NAME }}
 
-    - name: 成功
+    - name: 成功报告
       run: |
         ROUTE=$(cf app ${{ env.FINAL_APP_NAME }} | grep "routes:" | awk '{print $2}')
-        echo "✅ 2G版部署成功，地址: https://$ROUTE"
+        echo "✅ 部署完成！"
+        echo "地址: https://$ROUTE"
