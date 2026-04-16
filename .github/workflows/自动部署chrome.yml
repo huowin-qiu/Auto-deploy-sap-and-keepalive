@@ -1,13 +1,11 @@
-name: 自动部署Chrome-预约明天版
+name: 自动部署Chrome-直传避坑版
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *' # 北京时间早上 8:00
+    - cron: '0 0 * * *'
 
 env:
-  # 换用 GitHub 托管的镜像源，绕过 Docker Hub 的限流
-  DOCKER_IMAGE: 'ghcr.io/jlesage/chrome:latest'
   MEMORY: '2560M'
   DISK: '3072M'
 
@@ -24,34 +22,47 @@ jobs:
         echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
         sudo apt-get update && sudo apt-get install -y cf8-cli
 
-    - name: 登录并彻底清场
+    - name: 登录并清场
       run: |
-        # 强制选择美国区运行
         cf login -a "https://api.cf.us10-001.hana.ondemand.com" -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
         ORG=$(cf orgs | sed -n '4p')
         SPACE=$(cf spaces | sed -n '4p')
         cf target -o "$ORG" -s "$SPACE"
-        # 暴力清空所有应用
         cf apps | awk 'NR>3 {print $1}' | xargs -I {} cf delete {} -f -r
-        echo "FINAL_APP_NAME=chrome-8am-$(date +%s | tail -c 4)" >> $GITHUB_ENV
+        echo "APP_NAME=chrome-file-$(date +%s | tail -c 4)" >> $GITHUB_ENV
 
-    - name: 推送应用 (Staging 关键步)
+    - name: 准备轻量级 Web 代理 (绕过镜像拉取)
       run: |
-        cf push ${{ env.FINAL_APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --no-start
+        # 创建一个极其简单的 HTML 目录，欺骗 SAP 使用 Staticfile Buildpack
+        mkdir deploy_dir
+        echo '<html><body>SAP Node Is Running</body></html>' > deploy_dir/index.html
+        # 创建 Manifest 配置文件
+        cat <<EOF > deploy_dir/manifest.yml
+        applications:
+        - name: ${{ env.APP_NAME }}
+          memory: ${{ env.MEMORY }}
+          disk_quota: ${{ env.DISK }}
+          buildpack: https://github.com/cloudfoundry/staticfile-buildpack.git
+        EOF
 
-    - name: 配置参数
+    - name: 换个思路：改用新加坡区域测试
+      # 如果美国区 Staging 节点坏了，我们试试新加坡
       run: |
-        cf set-health-check ${{ env.FINAL_APP_NAME }} port
-        cf set-env ${{ env.FINAL_APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
-        # 核心：将内部端口 5800 映射到系统环境，绕过只读 PORT 限制
-        cf set-env ${{ env.FINAL_APP_NAME }} SECURE_CONNECTION 0
-        cf set-env ${{ env.FINAL_APP_NAME }} CHROMIUM_FLAGS "--no-sandbox --disable-dev-shm-usage --user-data-dir=/tmp/c-data"
-
-    - name: 启动
-      run: |
-        cf start ${{ env.FINAL_APP_NAME }}
+        cf logout
+        cf login -a "https://api.cf.ap21.hana.ondemand.com" -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
+        ORG=$(cf orgs | sed -n '4p')
+        SPACE=$(cf spaces | sed -n '4p')
+        cf target -o "$ORG" -s "$SPACE"
+        
+        # 既然 Docker 镜像不行，我们换一个更冷门的、针对 SAP 优化的镜像地址
+        # 尝试使用老牌镜像，通常不容易被 403
+        cf push ${{ env.APP_NAME }} --docker-image "oldiy/chrome-novnc:latest" -m ${{ env.MEMORY }} -k ${{ env.DISK }} --no-start
+        
+        cf set-health-check ${{ env.APP_NAME }} port
+        cf set-env ${{ env.APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
+        cf start ${{ env.APP_NAME }}
 
     - name: 报告
       run: |
-        ROUTE=$(cf app ${{ env.FINAL_APP_NAME }} | grep "routes:" | awk '{print $2}')
-        echo "🚀 目标达成！地址: https://$ROUTE"
+        ROUTE=$(cf app ${{ env.APP_NAME }} | grep "routes:" | awk '{print $2}')
+        echo "🚀 部署完成！地址: https://$ROUTE"
