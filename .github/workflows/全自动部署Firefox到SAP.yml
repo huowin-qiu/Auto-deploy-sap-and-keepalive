@@ -1,6 +1,4 @@
-on:
-  schedule:
-    - cron: '0 0 * * *'
+
 name: 自动部署Firefox到SAP-完整版
 
 on:
