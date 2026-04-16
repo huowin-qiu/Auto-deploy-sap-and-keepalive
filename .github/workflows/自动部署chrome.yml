@@ -1,4 +1,4 @@
-name: 自动部署Chrome-8080强制对齐版
+name: 自动部署Chrome-终极兼容修正版
 
 on:
   workflow_dispatch:
@@ -29,17 +29,18 @@ jobs:
         ORG=$(cf orgs | sed -n '4p')
         SPACE=$(cf spaces | sed -n '4p')
         cf target -o "$ORG" -s "$SPACE"
+        # 暴力清理释放配额
         cf apps | awk 'NR>3 {print $1}' | xargs -I {} cf delete {} -f -r
         echo "APP_NAME=chrome-final-$(date +%s | tail -c 4)" >> $GITHUB_ENV
 
-    - name: 部署并强制对齐端口
+    - name: 部署并修正健康检查语法
       run: |
         cf push ${{ env.APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --no-start
         
-        # 强制让健康检查盯着 8080
-        cf set-health-check ${{ env.APP_NAME }} port --port 8080
+        # 修正语法：去掉 --port 标志，直接声明使用 port 模式
+        cf set-health-check ${{ env.APP_NAME }} port
         
-        # 环境变量：命令镜像内部服务直接监听 8080
+        # 环境变量：让镜像内部服务直接监听 SAP 分配的默认环境
         cf set-env ${{ env.APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
         cf set-env ${{ env.APP_NAME }} NOVNC_PORT 8080
         cf set-env ${{ env.APP_NAME }} WEB_PORT 8080
