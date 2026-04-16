@@ -1,4 +1,4 @@
-name: 自动部署Chrome-直传避坑版
+name: 自动部署Chrome-8080强制对齐版
 
 on:
   workflow_dispatch:
@@ -6,6 +6,7 @@ on:
     - cron: '0 0 * * *'
 
 env:
+  DOCKER_IMAGE: 'oldiy/chrome-novnc:latest'
   MEMORY: '2560M'
   DISK: '3072M'
 
@@ -22,47 +23,37 @@ jobs:
         echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
         sudo apt-get update && sudo apt-get install -y cf8-cli
 
-    - name: 登录并清场
+    - name: 登录并清场 (新加坡区)
       run: |
-        cf login -a "https://api.cf.us10-001.hana.ondemand.com" -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
-        ORG=$(cf orgs | sed -n '4p')
-        SPACE=$(cf spaces | sed -n '4p')
-        cf target -o "$ORG" -s "$SPACE"
-        cf apps | awk 'NR>3 {print $1}' | xargs -I {} cf delete {} -f -r
-        echo "APP_NAME=chrome-file-$(date +%s | tail -c 4)" >> $GITHUB_ENV
-
-    - name: 准备轻量级 Web 代理 (绕过镜像拉取)
-      run: |
-        # 创建一个极其简单的 HTML 目录，欺骗 SAP 使用 Staticfile Buildpack
-        mkdir deploy_dir
-        echo '<html><body>SAP Node Is Running</body></html>' > deploy_dir/index.html
-        # 创建 Manifest 配置文件
-        cat <<EOF > deploy_dir/manifest.yml
-        applications:
-        - name: ${{ env.APP_NAME }}
-          memory: ${{ env.MEMORY }}
-          disk_quota: ${{ env.DISK }}
-          buildpack: https://github.com/cloudfoundry/staticfile-buildpack.git
-        EOF
-
-    - name: 换个思路：改用新加坡区域测试
-      # 如果美国区 Staging 节点坏了，我们试试新加坡
-      run: |
-        cf logout
         cf login -a "https://api.cf.ap21.hana.ondemand.com" -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
         ORG=$(cf orgs | sed -n '4p')
         SPACE=$(cf spaces | sed -n '4p')
         cf target -o "$ORG" -s "$SPACE"
+        cf apps | awk 'NR>3 {print $1}' | xargs -I {} cf delete {} -f -r
+        echo "APP_NAME=chrome-final-$(date +%s | tail -c 4)" >> $GITHUB_ENV
+
+    - name: 部署并强制对齐端口
+      run: |
+        cf push ${{ env.APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --no-start
         
-        # 既然 Docker 镜像不行，我们换一个更冷门的、针对 SAP 优化的镜像地址
-        # 尝试使用老牌镜像，通常不容易被 403
-        cf push ${{ env.APP_NAME }} --docker-image "oldiy/chrome-novnc:latest" -m ${{ env.MEMORY }} -k ${{ env.DISK }} --no-start
+        # 强制让健康检查盯着 8080
+        cf set-health-check ${{ env.APP_NAME }} port --port 8080
         
-        cf set-health-check ${{ env.APP_NAME }} port
+        # 环境变量：命令镜像内部服务直接监听 8080
         cf set-env ${{ env.APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
+        cf set-env ${{ env.APP_NAME }} NOVNC_PORT 8080
+        cf set-env ${{ env.APP_NAME }} WEB_PORT 8080
+        
+        # 性能与权限优化
+        cf set-env ${{ env.APP_NAME }} RESOLUTION 1280x720
+        cf set-env ${{ env.APP_NAME }} CHROMIUM_FLAGS "--no-sandbox --disable-dev-shm-usage --user-data-dir=/tmp/c-data"
+
+    - name: 启动应用
+      run: |
         cf start ${{ env.APP_NAME }}
 
     - name: 报告
       run: |
         ROUTE=$(cf app ${{ env.APP_NAME }} | grep "routes:" | awk '{print $2}')
-        echo "🚀 部署完成！地址: https://$ROUTE"
+        echo "🚀 部署完成！"
+        echo "访问地址: https://$ROUTE"
