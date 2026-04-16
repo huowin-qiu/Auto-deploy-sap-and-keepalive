@@ -1,24 +1,86 @@
-- name: Deploy application
+name: 自动部署Firefox到SAP-完整版
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: '选择部署区域'
+        required: true
+        default: 'SG(free)'
+        type: choice
+        options:
+          - SG(free)
+          - US(free)
+  schedule:
+    - cron: '0 0 * * *' # 北京时间早上 8:00 自动运行
+
+env:
+  # 资源配置：3G 内存 + 3G 硬盘
+  DOCKER_IMAGE: 'ghcr.io/eooce/firefox:latest'
+  MEMORY: '3072M'
+  DISK: '3072M'
+
+jobs:
+  deploy-app:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 安装 CF CLI
       run: |
-        # 1. 先推送，但不启动 (--no-start)，这样不会占用运行内存
+        wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key | sudo apt-key add -
+        echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
+        sudo apt-get update && sudo apt-get install -y cf8-cli
+
+    - name: 确定 API 和应用名
+      run: |
+        RANDOM_STR=$(head /dev/urandom | tr -dc 'a-z' | head -c 4)
+        # 定时任务默认走 SG 区，手动触发按需选择
+        REGION="${{ github.event.inputs.region }}"
+        if [ -z "$REGION" ]; then REGION="SG(free)"; fi
+        
+        if [ "$REGION" = "US(free)" ]; then
+          echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> $GITHUB_ENV
+          echo "APP_NAME=ff-us-$RANDOM_STR" >> $GITHUB_ENV
+        else
+          echo "CF_API=https://api.cf.ap21.hana.ondemand.com" >> $GITHUB_ENV
+          echo "APP_NAME=ff-sg-$RANDOM_STR" >> $GITHUB_ENV
+        fi
+
+    - name: 登录并彻底清场
+      run: |
+        cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
+        ORG=$(cf orgs | sed -n '4p')
+        SPACE=$(cf spaces | sed -n '4p')
+        cf target -o "$ORG" -s "$SPACE"
+        
+        # 强制删除所有应用，确保 4G 内存配额全部可用
+        cf apps | awk 'NR>3 {print $1}' | xargs -I {} cf delete {} -f -r
+
+    - name: 部署 (冷启动模式)
+      run: |
+        # 使用 --no-start 推送，不占用运行内存
         cf push ${{ env.APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --health-check-type port --no-start
         
-        # 2. 设置环境变量
+        # 注入环境变量
         cf set-env ${{ env.APP_NAME }} LANG "zh_CN.UTF-8"
         cf set-env ${{ env.APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
         cf set-env ${{ env.APP_NAME }} WEB_PORT 8080
         
-        # 3. 此时内存占用为 0，开始启动。由于没有运行中的应用，4G 空间足够 Staging 使用
+        # 启动应用（此时内存只有这一份 3G，不会超出 4G 限制）
         if cf start ${{ env.APP_NAME }}; then
           echo "Deployment successful"
         else
-          echo "启动失败，可能需要检查日志"
+          echo "启动失败，正在抓取日志..."
           cf logs ${{ env.APP_NAME }} --recent
           exit 1
         fi
 
-    - name: Verify deployment
+    - name: 验证并输出结果
       run: |
         ROUTE=$(cf app ${{ env.APP_NAME }} | grep "routes:" | awk '{print $2}')
-        echo "✅ Firefox 部署完成！"
+        echo "🚀 Firefox 部署完成！"
         echo "访问地址: https://$ROUTE"
+        echo "VNC 密码: ${{ secrets.VNC_PASSWORD || '123456' }}"
