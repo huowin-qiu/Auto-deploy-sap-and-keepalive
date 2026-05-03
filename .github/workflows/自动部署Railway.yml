@@ -1,0 +1,92 @@
+name: 自动部署Railway到SAP
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: '选择部署区域'
+        required: true
+        default: 'SG(free)'
+        type: choice
+        options:
+          - SG(free)
+          - US(free)
+      app_name:
+        description: '应用名称（留空则自动生成）'
+        required: false
+        default: ''
+
+env:
+  # 使用你刚刚构建成功的镜像地址
+  DOCKER_IMAGE: 'ghcr.io/huowin-qiu/railway:1.0.0'
+  MEMORY: '2048M'
+  DISK: '2048M'
+
+jobs:
+  deploy-app:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 安装 CF CLI
+      run: |
+        wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key | sudo apt-key add -
+        echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
+        sudo apt-get update && sudo apt-get install -y cf8-cli
+
+    - name: 确定 API 和应用名
+      run: |
+        RANDOM_STR=$(head /dev/urandom | tr -dc 'a-z' | head -c 4)
+        
+        if [ "${{ github.event.inputs.region }}" = "US(free)" ]; then
+          echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> $GITHUB_ENV
+          echo "APP_NAME=rw-us-$RANDOM_STR" >> $GITHUB_ENV
+        else
+          echo "CF_API=https://api.cf.ap21.hana.ondemand.com" >> $GITHUB_ENV
+          echo "APP_NAME=rw-sg-$RANDOM_STR" >> $GITHUB_ENV
+        fi
+        
+        if [ -n "${{ github.event.inputs.app_name }}" ]; then
+          echo "APP_NAME=${{ github.event.inputs.app_name }}" >> $GITHUB_ENV
+        fi
+
+    - name: 登录并清理旧应用
+      run: |
+        cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
+        ORG=$(cf orgs | sed -n '4p')
+        SPACE=$(cf spaces | sed -n '4p')
+        cf target -o "$ORG" -s "$SPACE"
+        
+        # 自动删除同名应用（如果存在），确保干净部署
+        cf delete ${{ env.APP_NAME }} -f -r || true
+
+    - name: 部署 (冷启动逻辑)
+      run: |
+        # 1. 推送但不启动，不占用 Staging 内存
+        cf push ${{ env.APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --no-start
+        
+        # 2. 注入必要的环境变量
+        cf set-env ${{ env.APP_NAME }} LANG "zh_CN.UTF-8"
+        cf set-env ${{ env.APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
+        cf set-env ${{ env.APP_NAME }} PORT 8080
+        
+        # 3. 设置健康检查模式为 process (针对 Railway 这种可能没有 Web 服务的镜像更稳)
+        cf set-health-check ${{ env.APP_NAME }} process
+        
+        # 4. 启动应用
+        if cf start ${{ env.APP_NAME }}; then
+          echo "Deployment successful"
+        else
+          echo "启动失败，正在清理..."
+          cf logs ${{ env.APP_NAME }} --recent
+          cf delete ${{ env.APP_NAME }} -f
+          exit 1
+        fi
+
+    - name: 输出部署结果
+      run: |
+        ROUTE=$(cf app ${{ env.APP_NAME }} | grep "routes:" | awk '{print $2}')
+        echo "🚀 应用部署完成！"
+        echo "访问地址 (如果是Web应用): https://$ROUTE"
