@@ -65,12 +65,7 @@ jobs:
     - name: 部署 (冷启动逻辑)
       run: |
         # 1. 推送但不启动，不占用 Staging 内存
-        cf push ${{ env.APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --no-start
-        
-        # 2. 注入必要的环境变量
-        cf set-env ${{ env.APP_NAME }} LANG "zh_CN.UTF-8"
-        cf set-env ${{ env.APP_NAME }} VNC_PASSWORD "${{ secrets.VNC_PASSWORD || '123456' }}"
-        cf set-env ${{ env.APP_NAME }} PORT 8080
+        cf push ${{ env.APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} -k ${{ env.DISK }} --no-star
         
         # 3. 设置健康检查模式为 process (针对 Railway 这种可能没有 Web 服务的镜像更稳)
         cf set-health-check ${{ env.APP_NAME }} process
